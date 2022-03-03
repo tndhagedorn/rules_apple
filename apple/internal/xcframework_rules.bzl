@@ -88,6 +88,7 @@ load(
     "swift_usage_aspect",
 )
 load("@bazel_skylib//lib:dicts.bzl", "dicts")
+load("@bazel_skylib//lib:paths.bzl", "paths")
 
 def _lipoed_link_outputs_by_framework(
         *,
@@ -933,17 +934,35 @@ def _apple_static_xcframework_transition_rule_impl(ctx):
             output_discriminator = None,
             dir_name = "headers",
         )
+
+        headers = [
+            intermediates.file(
+                actions = ctx.actions,
+                target_name = ctx.label.name,
+                output_discriminator = None,
+                file_name = paths.join(header.path, header.basename),
+            )
+            for header in resolved_headers.to_list()
+        ]
+
         ctx.actions.run_shell(
-            command = "mkdir -p " + headers_directory.path + " ; " + " ; ".join(
-                ["cp %s %s" % (x.path, headers_directory.path) for x in resolved_headers.to_list()],
-            ),
-            inputs = resolved_headers,
-            mnemonic = "XCFrameworkStaticLibraryCopyHeaders",
+            command = "mkdir -p {}".format(headers_directory.path),
             outputs = [headers_directory],
-            progress_message = "Copying headers %s" % ctx.label,
+            progress_message = "Creating headers directory {}".format(headers_directory.path)
         )
-        headers_cmd = " -headers " + headers_directory.path
-        generator_inputs = depset([headers_directory], transitive = [resolved_libraries])
+
+        [
+            ctx.actions.run_shell(
+                command = "cp {} {}".format(src.path, out.path),
+                inputs = [src],
+                outputs = [out],
+                progress_message = "Creating header {}".format(out.path)
+            )
+            for src, out in zip(resolved_headers.to_list(), headers)
+        ]
+
+        headers_cmd = " -headers {}".format(headers_directory.path)
+        generator_inputs = depset(headers, transitive = [resolved_libraries])
     else:
         headers_cmd = ""
         generator_inputs = resolved_libraries
