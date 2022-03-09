@@ -87,6 +87,7 @@ load(
     "SwiftInfo",
     "swift_usage_aspect",
 )
+load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@bazel_skylib//lib:dicts.bzl", "dicts")
 
 def _lipoed_link_outputs_by_framework(
@@ -923,9 +924,7 @@ def _apple_static_xcframework_transition_rule_impl(ctx):
     xcode_config = ctx.attr._xcode_config[apple_common.XcodeVersionConfig]
 
     if ctx.attr.headers:
-        resolved_headers = depset(transitive = [dep.files for dep in ctx.attr.headers])
-
-        # Create an intermediate folder to contain all of the header files, as they cannot be passed
+       # Create an intermediate folder to contain all of the header files, as they cannot be passed
         # individually to the xcodebuild -create-xcframework tool.
         headers_directory = intermediates.directory(
             actions = ctx.actions,
@@ -933,9 +932,40 @@ def _apple_static_xcframework_transition_rule_impl(ctx):
             output_discriminator = None,
             dir_name = "headers",
         )
+
+        modulemap = intermediates.file(
+            actions = ctx.actions,
+            target_name = ctx.label.name,
+            output_discriminator = None,
+            file_name = paths.join("module.modulemap"),
+        )
+
+        resolved_headers = depset(
+            #[modulemap],
+            transitive = ([dep.files for dep in ctx.attr.headers]))
+
+# TODO - add imports - those can go in modulemaps too
+        ctx.actions.write(
+            output = modulemap,
+            content = """
+module {bundle_name} {{
+{header_decls}
+    export *
+}}
+""".format(
+                bundle_name = bundle_name,
+                header_decls = "\n".join([
+                    '    header "{}"'.format(hdr.basename) for hdr in resolved_headers.to_list()
+                ])
+            )
+        )
+        print(modulemap)
+
         ctx.actions.run_shell(
             command = "mkdir -p " + headers_directory.path + " ; " + " ; ".join(
-                ["cp %s %s" % (x.path, headers_directory.path) for x in resolved_headers.to_list()],
+                # multi-arch (fat) libraries resolve the same headers for each arch in the library.  Ex static objc lib for ios sim for x64 and arm64
+                # just overwrite any duplicates (assumes they're the same for each arch - framework bundling doesn't allow different headers/arch in the same platform anyways)
+                ["[ -f {dst} ] && chmod u+w {dst}; cp {src} {dst}".format(src=x.path, dst=paths.join(headers_directory.path, x.basename)) for x in resolved_headers.to_list()],
             ),
             inputs = resolved_headers,
             mnemonic = "XCFrameworkStaticLibraryCopyHeaders",
@@ -943,7 +973,7 @@ def _apple_static_xcframework_transition_rule_impl(ctx):
             progress_message = "Copying headers %s" % ctx.label,
         )
         headers_cmd = " -headers " + headers_directory.path
-        generator_inputs = depset([headers_directory], transitive = [resolved_libraries])
+        generator_inputs = depset([headers_directory, modulemap], transitive = [resolved_libraries])
     else:
         headers_cmd = ""
         generator_inputs = resolved_libraries
@@ -954,9 +984,20 @@ def _apple_static_xcframework_transition_rule_impl(ctx):
         [" -library " + x.path + headers_cmd for x in resolved_libraries.to_list()],
     )
 
-    cmd = ("xcodebuild -create-xcframework " + library_list_cmd + " -output " +
-           bundle_name_with_extension + " ; zip -rXq " + ctx.outputs.archive.path + " " +
-           bundle_name_with_extension)
+    cmd = """
+        xcodebuild -create-xcframework {library_list_cmd} -output {bundle_name_with_extension}
+        for headers_dir in {bundle_name_with_extension}/*/Headers; do
+            chmod u+w $headers_dir
+            cp {modulemap} $headers_dir/
+        done
+        zip -rXq {archive_path} {bundle_name_with_extension}
+        """.format(
+            library_list_cmd = library_list_cmd,
+            bundle_name_with_extension = bundle_name_with_extension,
+            modulemap = modulemap.path,
+            archive_path = ctx.outputs.archive.path,
+        )
+    print(cmd)
 
     apple_support.run_shell(
         actions = ctx.actions,
@@ -965,7 +1006,7 @@ def _apple_static_xcframework_transition_rule_impl(ctx):
         env = ctx.configuration.default_shell_env,
         inputs = generator_inputs,
         mnemonic = "XCFrameworkStaticLibraryGenerate",
-        outputs = [ctx.outputs.archive],
+        outputs = [ctx.outputs.archive, ],
         progress_message = "Generating static library XCFramework %s" % ctx.label,
         xcode_config = xcode_config,
     )
